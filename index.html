@@ -3,39 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Spatial Scene Proto</title>
+    <title>AI Spatial Scene - v2</title>
     <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
     <style>
-        body { margin: 0; background: #111; color: white; font-family: sans-serif; overflow: hidden; }
-        #controls { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; }
-        canvas { display: block; }
-        #loading { display: none; margin-top: 10px; color: #0f0; }
+        body { margin: 0; background: #000; color: #eee; font-family: 'Helvetica Neue', Arial, sans-serif; overflow: hidden; }
+        #ui { position: absolute; top: 20px; left: 20px; z-index: 100; background: rgba(20, 20, 20, 0.85); padding: 20px; border-radius: 12px; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); width: 280px; }
+        h3 { margin: 0 0 15px 0; font-weight: 300; letter-spacing: 1px; color: #fff; }
+        input[type="file"] { width: 100%; color: #888; }
+        #status { margin-top: 15px; font-size: 13px; min-height: 20px; transition: all 0.3s; }
+        .progress-bar { width: 100%; height: 4px; background: #333; margin-top: 8px; border-radius: 2px; overflow: hidden; display: none; }
+        #progress-fill { width: 0%; height: 100%; background: #007aff; transition: width 0.1s; }
+        .hint { font-size: 11px; margin-top: 15px; color: #666; line-height: 1.4; }
     </style>
 </head>
 <body>
 
-<div id="controls">
-    <h3>Spatial Scene Proto</h3>
+<div id="ui">
+    <h3>Spatial Scene</h3>
     <input type="file" id="upload" accept="image/*">
-    <div id="loading">AI解析中... (初回はモデルをDLします)</div>
-    <p style="font-size: 12px; opacity: 0.7;">マウス移動またはスマホ傾斜で動きます</p>
+    <div id="status">画像を選択してください</div>
+    <div class="progress-bar" id="p-bar"><div id="progress-fill"></div></div>
+    <div class="hint">マウスの動きに合わせて、AIが推定した深度に基づきピクセルを微細にオフセットします。</div>
 </div>
 
 <script type="module">
-    // 最新のパッケージ名に変更（V3系）
     import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0-alpha.13';
     
-    // WebGPU/WASMの最適化設定
+    // WebWorkerや外部リソースの読み込み制限を回避
     env.allowLocalModels = false;
 
     let renderer, scene, camera, material;
     let depthEstimator;
+
     const upload = document.getElementById('upload');
-    const loading = document.getElementById('loading');
+    const status = document.getElementById('status');
+    const pBar = document.getElementById('p-bar');
+    const pFill = document.getElementById('progress-fill');
 
-    initScene();
+    init();
 
-    async function initScene() {
+    function init() {
+        // --- Three.js Setup ---
         scene = new THREE.Scene();
         camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -47,7 +55,9 @@
             uniforms: {
                 u_texture: { value: new THREE.Texture() },
                 u_depth: { value: new THREE.Texture() },
-                u_offset: { value: new THREE.Vector2(0, 0) }
+                u_offset: { value: new THREE.Vector2(0, 0) },
+                u_res: { value: new THREE.Vector2(1, 1) },
+                u_screen: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
             },
             vertexShader: `
                 varying vec2 vUv;
@@ -60,18 +70,33 @@
                 uniform sampler2D u_texture;
                 uniform sampler2D u_depth;
                 uniform vec2 u_offset;
+                uniform vec2 u_res;
+                uniform vec2 u_screen;
                 varying vec2 vUv;
+
                 void main() {
-                    float depth = texture2D(u_depth, vUv).r;
-                    vec2 displacedUv = vUv + u_offset * depth;
-                    gl_FragColor = texture2D(u_texture, displacedUv);
+                    // アスペクト比補正 (Object-fit: cover)
+                    float sAspect = u_screen.x / u_screen.y;
+                    float iAspect = u_res.x / u_res.y;
+                    vec2 ratio = vec2(
+                        min(sAspect / iAspect, 1.0),
+                        min(iAspect / sAspect, 1.0)
+                    );
+                    vec2 uv = vUv * ratio + (1.0 - ratio) * 0.5;
+
+                    // 深度をサンプリング
+                    float d = texture2D(u_depth, uv).r;
+                    
+                    // パララックス（深度に応じたずらし）
+                    vec2 finalUv = uv + u_offset * d;
+                    
+                    gl_FragColor = texture2D(u_texture, finalUv);
                 }
             `
         });
 
-        const mesh = new THREE.Mesh(geometry, material);
-        scene.add(mesh);
-        animate();
+        scene.add(new THREE.Mesh(geometry, material));
+        render();
     }
 
     upload.addEventListener('change', async (e) => {
@@ -79,58 +104,73 @@
         if (!file) return;
 
         const url = URL.createObjectURL(file);
-        loading.style.display = 'block';
-        loading.innerText = "モデルをロード中... (初回のみ約30MB)";
+        pBar.style.display = 'block';
+        status.innerText = "モデルを準備中...";
 
         try {
-            // 最新の公式リポジトリ名を指定
+            // --- AI Pipeline ---
             if (!depthEstimator) {
                 depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', {
-                    device: 'webgpu', // 可能ならGPUを使う
+                    device: 'webgpu',
+                    progress_callback: (p) => {
+                        if (p.status === 'progress') {
+                            const pct = Math.round(p.progress);
+                            pFill.style.width = pct + "%";
+                            status.innerText = `モデルをダウンロード中: ${pct}%`;
+                        }
+                    }
                 });
             }
 
-            loading.innerText = "画像を解析中...";
-            const output = await depthEstimator(url);
+            status.innerText = "深度を推定中...";
+            const result = await depthEstimator(url);
             
-            const texLoader = new THREE.TextureLoader();
-            material.uniforms.u_texture.value = texLoader.load(url);
-            
-            // 深度マップをテクスチャ化
-            const depthData = output.depth;
-            const depthCanvas = document.createElement('canvas');
-            depthCanvas.width = depthData.width;
-            depthCanvas.height = depthData.height;
-            const ctx = depthCanvas.getContext('2d');
-            const imageData = ctx.createImageData(depthCanvas.width, depthCanvas.height);
-            
-            // 1次元データをRGBAに展開
-            for (let i = 0; i < depthData.data.length; i++) {
-                const val = depthData.data[i];
-                const idx = i * 4;
-                imageData.data[idx] = val;
-                imageData.data[idx + 1] = val;
-                imageData.data[idx + 2] = val;
-                imageData.data[idx + 3] = 255;
-            }
-            ctx.putImageData(imageData, 0, 0);
-            material.uniforms.u_depth.value = new THREE.CanvasTexture(depthCanvas);
+            // --- Texture Loading ---
+            const loader = new THREE.TextureLoader();
+            loader.load(url, (tex) => {
+                material.uniforms.u_res.value.set(tex.image.width, tex.image.height);
+                material.uniforms.u_texture.value = tex;
+            });
 
-            loading.style.display = 'none';
+            // --- Depth Data Process ---
+            const { width, height, data } = result.depth;
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            const imgData = ctx.createImageData(width, height);
+            
+            for (let i = 0; i < data.length; i++) {
+                const v = data[i];
+                const ii = i * 4;
+                imgData.data[ii] = v; imgData.data[ii+1] = v; imgData.data[ii+2] = v; imgData.data[ii+3] = 255;
+            }
+            ctx.putImageData(imgData, 0, 0);
+            material.uniforms.u_depth.value = new THREE.CanvasTexture(canvas);
+
+            status.innerText = "完了";
+            setTimeout(() => { pBar.style.display = 'none'; }, 1000);
+
         } catch (err) {
             console.error(err);
-            loading.innerText = "エラーが発生しました: " + err.message;
+            status.innerText = "エラー: " + err.message;
         }
     });
 
     window.addEventListener('mousemove', (e) => {
         const x = (e.clientX / window.innerWidth) - 0.5;
         const y = (e.clientY / window.innerHeight) - 0.5;
-        if (material) material.uniforms.u_offset.value.set(x * 0.05, -y * 0.05);
+        // プロ推奨の控えめな動き (強度0.03)
+        if (material) material.uniforms.u_offset.value.set(x * 0.03, -y * 0.03);
     });
 
-    function animate() {
-        requestAnimationFrame(animate);
+    window.addEventListener('resize', () => {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        material.uniforms.u_screen.value.set(window.innerWidth, window.innerHeight);
+    });
+
+    function render() {
+        requestAnimationFrame(render);
         renderer.render(scene, camera);
     }
 </script>
