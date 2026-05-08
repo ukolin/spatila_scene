@@ -22,10 +22,10 @@
 </div>
 
 <script type="module">
-    // Transformers.jsの読み込み
-    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1';
+    // 最新のパッケージ名に変更（V3系）
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0-alpha.13';
     
-    // WebGPUが使える場合は使用する設定
+    // WebGPU/WASMの最適化設定
     env.allowLocalModels = false;
 
     let renderer, scene, camera, material;
@@ -33,42 +33,36 @@
     const upload = document.getElementById('upload');
     const loading = document.getElementById('loading');
 
-    // 1. Three.jsの基本セットアップ
     initScene();
 
     async function initScene() {
         scene = new THREE.Scene();
         camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-        renderer = new THREE.WebGLRenderer();
+        renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
-        // 空間シーン用シェーダー（2.5Dワープ）
         const geometry = new THREE.PlaneGeometry(2, 2);
         material = new THREE.ShaderMaterial({
             uniforms: {
-                u_texture: { value: null },
-                u_depth: { value: null },
-                u_offset: { value: new THREE.Vector2(0, 0) },
-                u_ratio: { value: 1.0 }
+                u_texture: { value: new THREE.Texture() },
+                u_depth: { value: new THREE.Texture() },
+                u_offset: { value: new THREE.Vector2(0, 0) }
             },
             vertexShader: `
                 varying vec2 vUv;
                 void main() {
                     vUv = uv;
-                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    gl_Position = vec4(position, 1.0);
                 }
             `,
             fragmentShader: `
                 uniform sampler2D u_texture;
                 uniform sampler2D u_depth;
                 uniform vec2 u_offset;
-                uniform float u_ratio;
                 varying vec2 vUv;
                 void main() {
-                    // 深度マップをサンプリング（黒=奥、白=手前）
                     float depth = texture2D(u_depth, vUv).r;
-                    // 深度に応じてUV座標をずらす（2.5Dワープ）
                     vec2 displacedUv = vUv + u_offset * depth;
                     gl_FragColor = texture2D(u_texture, displacedUv);
                 }
@@ -80,70 +74,65 @@
         animate();
     }
 
-    // 2. 画像アップロード & AI解析
     upload.addEventListener('change', async (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
-        loading.style.display = 'block';
         const url = URL.createObjectURL(file);
+        loading.style.display = 'block';
+        loading.innerText = "モデルをロード中... (初回のみ約30MB)";
 
-        // 初回のみAIモデルをロード
-        if (!depthEstimator) {
-            depthEstimator = await pipeline('depth-estimation', 'Xenova/depth-anything-v2-small');
+        try {
+            // 最新の公式リポジトリ名を指定
+            if (!depthEstimator) {
+                depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', {
+                    device: 'webgpu', // 可能ならGPUを使う
+                });
+            }
+
+            loading.innerText = "画像を解析中...";
+            const output = await depthEstimator(url);
+            
+            const texLoader = new THREE.TextureLoader();
+            material.uniforms.u_texture.value = texLoader.load(url);
+            
+            // 深度マップをテクスチャ化
+            const depthData = output.depth;
+            const depthCanvas = document.createElement('canvas');
+            depthCanvas.width = depthData.width;
+            depthCanvas.height = depthData.height;
+            const ctx = depthCanvas.getContext('2d');
+            const imageData = ctx.createImageData(depthCanvas.width, depthCanvas.height);
+            
+            // 1次元データをRGBAに展開
+            for (let i = 0; i < depthData.data.length; i++) {
+                const val = depthData.data[i];
+                const idx = i * 4;
+                imageData.data[idx] = val;
+                imageData.data[idx + 1] = val;
+                imageData.data[idx + 2] = val;
+                imageData.data[idx + 3] = 255;
+            }
+            ctx.putImageData(imageData, 0, 0);
+            material.uniforms.u_depth.value = new THREE.CanvasTexture(depthCanvas);
+
+            loading.style.display = 'none';
+        } catch (err) {
+            console.error(err);
+            loading.innerText = "エラーが発生しました: " + err.message;
         }
-
-        // 深度推定の実行
-        const output = await depthEstimator(url);
-        
-        // 元画像と深度マップをテクスチャ化
-        const texLoader = new THREE.TextureLoader();
-        material.uniforms.u_texture.value = texLoader.load(url);
-        
-        // 深度データをCanvas経由でテクスチャにする
-        const depthCanvas = document.createElement('canvas');
-        depthCanvas.width = output.depth.width;
-        depthCanvas.height = output.depth.height;
-        const ctx = depthCanvas.getContext('2d');
-        const imageData = ctx.createImageData(depthCanvas.width, depthCanvas.height);
-        
-        // 0-255のグレースケールに変換してセット
-        for (let i = 0; i < output.depth.data.length; i++) {
-            const val = output.depth.data[i];
-            imageData.data[i * 4] = val;
-            imageData.data[i * 4 + 1] = val;
-            imageData.data[i * 4 + 2] = val;
-            imageData.data[i * 4 + 3] = 255;
-        }
-        ctx.putImageData(imageData, 0, 0);
-        material.uniforms.u_depth.value = new THREE.CanvasTexture(depthCanvas);
-
-        loading.style.display = 'none';
     });
 
-    // 3. インタラクション（マウス移動）
     window.addEventListener('mousemove', (e) => {
         const x = (e.clientX / window.innerWidth) - 0.5;
         const y = (e.clientY / window.innerHeight) - 0.5;
-        // ずらし量を制限（ここが「大きく動かさない」コツ）
-        material.uniforms.u_offset.value.set(x * 0.05, -y * 0.05);
-    });
-
-    // スマホのジャイロ対応
-    window.addEventListener('deviceorientation', (e) => {
-        const x = e.gamma / 45; // 左右
-        const y = e.beta / 45;  // 前後
-        material.uniforms.u_offset.value.set(x * 0.05, y * 0.05);
+        if (material) material.uniforms.u_offset.value.set(x * 0.05, -y * 0.05);
     });
 
     function animate() {
         requestAnimationFrame(animate);
         renderer.render(scene, camera);
     }
-
-    window.addEventListener('resize', () => {
-        renderer.setSize(window.innerWidth, window.innerHeight);
-    });
 </script>
 </body>
 </html>
