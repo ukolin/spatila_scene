@@ -3,67 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Spatial Scene - Final Proto</title>
+    <title>AI Spatial Scene - Layered</title>
     <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
     <style>
-        body { margin: 0; background: #050505; color: #eee; font-family: 'Helvetica Neue', Arial, sans-serif; overflow: hidden; }
-        #ui { position: absolute; top: 20px; left: 20px; z-index: 100; background: rgba(15, 15, 15, 0.85); padding: 25px; border-radius: 16px; backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); width: 300px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
-        h3 { margin: 0 0 20px 0; font-weight: 300; letter-spacing: 2px; color: #fff; text-align: center; border-bottom: 1px solid #333; padding-bottom: 10px; }
-        
-        .control-group { margin-bottom: 20px; }
-        label { display: block; font-size: 11px; color: #888; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
-        
-        input[type="file"] { width: 100%; font-size: 12px; color: #aaa; background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; border: 1px dashed #444; box-sizing: border-box; }
-
-        input[type="range"] { width: 100%; margin: 0; cursor: pointer; accent-color: #007aff; }
-
-        #status { font-size: 12px; min-height: 18px; color: #007aff; text-align: center; margin-top: 15px; font-weight: bold; }
-        .progress-bar { width: 100%; height: 4px; background: #222; margin-top: 10px; border-radius: 2px; overflow: hidden; display: none; }
-        #progress-fill { width: 0%; height: 100%; background: #007aff; transition: width 0.1s; }
-        
-        .hint { font-size: 10px; margin-top: 20px; color: #555; line-height: 1.5; text-align: center; }
+        body { margin: 0; background: #050505; color: #eee; font-family: sans-serif; overflow: hidden; }
+        #ui { position: absolute; top: 20px; left: 20px; z-index: 100; background: rgba(0,0,0,0.8); padding: 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); width: 260px; }
+        input[type="range"] { width: 100%; accent-color: #007aff; }
+        label { font-size: 11px; color: #888; display: block; margin-top: 10px; }
+        #status { font-size: 12px; margin-top: 10px; color: #0f0; text-align: center; }
     </style>
 </head>
 <body>
 
 <div id="ui">
-    <h3>SPATIAL SCENE</h3>
+    <h4 style="margin:0 0 10px 0">Layered Spatial Scene</h4>
+    <input type="file" id="upload" accept="image/*">
     
-    <div class="control-group">
-        <label>1. Select Image</label>
-        <input type="file" id="upload" accept="image/*">
-    </div>
-
-    <div class="control-group">
-        <label>2. Display Scale (Zoom)</label>
-        <input type="range" id="scale-slider" min="0.1" max="2.0" step="0.01" value="1.0">
-    </div>
-
-    <div class="control-group">
-        <label>3. Parallax Intensity</label>
-        <input type="range" id="depth-slider" min="0.0" max="0.1" step="0.001" value="0.03">
-    </div>
-
-    <div id="status">Waiting for image...</div>
-    <div class="progress-bar" id="p-bar"><div id="progress-fill"></div></div>
+    <label>被写体の拡大率 (穴を隠す量)</label>
+    <input type="range" id="subject-scale" min="1.0" max="1.2" step="0.001" value="1.05">
     
-    <div class="hint">Mouse move to explore depth.<br>Depth-Anything-V2-Small inside.</div>
+    <label>パララックス強度</label>
+    <input type="range" id="intensity" min="0" max="0.1" step="0.001" value="0.04">
+
+    <div id="status">画像を選択</div>
 </div>
 
 <script type="module">
     import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0-alpha.13';
-    
     env.allowLocalModels = false;
 
-    let renderer, scene, camera, material, mesh;
+    let renderer, scene, camera, material;
     let depthEstimator;
 
     const upload = document.getElementById('upload');
     const status = document.getElementById('status');
-    const pBar = document.getElementById('p-bar');
-    const pFill = document.getElementById('progress-fill');
-    const scaleSlider = document.getElementById('scale-slider');
-    const depthSlider = document.getElementById('depth-slider');
+    const subScaleUI = document.getElementById('subject-scale');
+    const intensityUI = document.getElementById('intensity');
 
     init();
 
@@ -72,145 +47,103 @@
         camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         document.body.appendChild(renderer.domElement);
 
         const geometry = new THREE.PlaneGeometry(2, 2);
-        
         material = new THREE.ShaderMaterial({
             uniforms: {
                 u_texture: { value: new THREE.Texture() },
                 u_depth: { value: new THREE.Texture() },
                 u_offset: { value: new THREE.Vector2(0, 0) },
-                u_intensity: { value: 0.03 },
                 u_res: { value: new THREE.Vector2(1, 1) },
                 u_screen: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-                u_scale: { value: 1.0 }
+                u_intensity: { value: 0.04 },
+                u_subScale: { value: 1.05 }
             },
             vertexShader: `
                 varying vec2 vUv;
-                void main() {
-                    vUv = uv;
-                    gl_Position = vec4(position, 1.0);
-                }
+                void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
             `,
             fragmentShader: `
                 uniform sampler2D u_texture;
                 uniform sampler2D u_depth;
                 uniform vec2 u_offset;
-                uniform float u_intensity;
                 uniform vec2 u_res;
                 uniform vec2 u_screen;
-                uniform float u_scale;
+                uniform float u_intensity;
+                uniform float u_subScale;
                 varying vec2 vUv;
 
                 void main() {
-                    // Aspect ratio calculation (object-fit: cover logic)
+                    // アスペクト比補正計算
                     float sAspect = u_screen.x / u_screen.y;
                     float iAspect = u_res.x / u_res.y;
-                    
-                    // Apply zoom scale here
-                    vec2 ratio = vec2(
-                        min(sAspect / iAspect, 1.0) / u_scale,
-                        min(iAspect / sAspect, 1.0) / u_scale
-                    );
-                    
-                    // Center-based UV calculation
-                    vec2 uv = (vUv - 0.5) * ratio + 0.5;
+                    vec2 ratio = vec2(min(sAspect / iAspect, 1.0), min(iAspect / sAspect, 1.0));
+                    vec2 uv = vUv * ratio + (1.0 - ratio) * 0.5;
 
-                    // Discard pixels outside image bounds
-                    if(uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-                        discard;
-                    }
-
-                    // Sample smoothed depth
+                    // 1. 背景レイヤー (ワープあり)
                     float d = texture2D(u_depth, uv).r;
+                    vec2 bgUv = uv + u_offset * u_intensity * d;
+                    vec4 bgColor = texture2D(u_texture, bgUv);
+
+                    // 2. 被写体レイヤー (手前のものだけ抽出して拡大)
+                    // 深度が一定以上の部分を手前とみなす簡易マスク
+                    float threshold = 0.5; 
+                    float mask = smoothstep(threshold - 0.1, threshold + 0.1, d);
                     
-                    // Calculate parallax displacement
-                    vec2 finalUv = uv + u_offset * u_intensity * d;
+                    // 被写体用のUV (中心から少し拡大)
+                    vec2 subUv = (uv - 0.5) / u_subScale + 0.5;
+                    // 被写体も背景より少し多めに動かす
+                    subUv += u_offset * u_intensity * 1.2; 
                     
-                    gl_FragColor = texture2D(u_texture, finalUv);
+                    vec4 subColor = texture2D(u_texture, subUv);
+
+                    // 合成 (手前のマスク部分を上に重ねる)
+                    // 被写体レイヤーが拡大されているので、背景の歪みを上から覆い隠す
+                    vec4 finalColor = mix(bgColor, subColor, mask);
+                    
+                    gl_FragColor = finalColor;
                 }
             `
         });
 
-        mesh = new THREE.Mesh(geometry, material);
-        scene.add(mesh);
-        
+        scene.add(new THREE.Mesh(geometry, material));
         animate();
     }
 
     upload.addEventListener('change', async (e) => {
         const file = e.target.files[0];
         if (!file) return;
-
         const url = URL.createObjectURL(file);
-        pBar.style.display = 'block';
-        status.innerText = "Initializing AI...";
+        status.innerText = "AI解析中...";
 
-        try {
-            if (!depthEstimator) {
-                depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', {
-                    device: 'webgpu',
-                    progress_callback: (p) => {
-                        if (p.status === 'progress') {
-                            const pct = Math.round(p.progress);
-                            pFill.style.width = pct + "%";
-                            status.innerText = `Downloading Model: ${pct}%`;
-                        }
-                    }
-                });
-            }
-
-            status.innerText = "Estimating Depth...";
-            const result = await depthEstimator(url);
-            
-            const loader = new THREE.TextureLoader();
-            loader.load(url, (tex) => {
-                material.uniforms.u_res.value.set(tex.image.width, tex.image.height);
-                material.uniforms.u_texture.value = tex;
-                tex.needsUpdate = true;
-            });
-
-            // Smooth Depth Map Process
-            const { width, height, data } = result.depth;
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            
-            const imgData = ctx.createImageData(width, height);
-            for (let i = 0; i < data.length; i++) {
-                const v = data[i];
-                const ii = i * 4;
-                imgData.data[ii] = v; imgData.data[ii+1] = v; imgData.data[ii+2] = v; imgData.data[ii+3] = 255;
-            }
-            ctx.putImageData(imgData, 0, 0);
-
-            // Apply Gaussian Blur to smooth edges
-            ctx.globalCompositeOperation = 'copy';
-            ctx.filter = `blur(${Math.max(width, height) * 0.015}px)`; 
-            ctx.drawImage(canvas, 0, 0);
-
-            const depthTex = new THREE.CanvasTexture(canvas);
-            material.uniforms.u_depth.value = depthTex;
-
-            status.innerText = "Analysis Complete";
-            setTimeout(() => { pBar.style.display = 'none'; }, 1500);
-
-        } catch (err) {
-            console.error(err);
-            status.innerText = "Error: " + err.message;
+        if (!depthEstimator) {
+            depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', { device: 'webgpu' });
         }
-    });
 
-    // UI Updates
-    scaleSlider.addEventListener('input', (e) => {
-        material.uniforms.u_scale.value = parseFloat(e.target.value);
-    });
-    
-    depthSlider.addEventListener('input', (e) => {
-        material.uniforms.u_intensity.value = parseFloat(e.target.value);
+        const result = await depthEstimator(url);
+        
+        // テクスチャロード
+        new THREE.TextureLoader().load(url, (tex) => {
+            material.uniforms.u_res.value.set(tex.image.width, tex.image.height);
+            material.uniforms.u_texture.value = tex;
+        });
+
+        // 深度マップをぼかしてセット (境界線を馴染ませる)
+        const canvas = document.createElement('canvas');
+        canvas.width = result.depth.width; canvas.height = result.depth.height;
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.createImageData(canvas.width, canvas.height);
+        for (let i = 0; i < result.depth.data.length; i++) {
+            const v = result.depth.data[i];
+            imgData.data[i*4]=v; imgData.data[i*4+1]=v; imgData.data[i*4+2]=v; imgData.data[i*4+3]=255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        ctx.filter = 'blur(4px)'; // 深度エッジをぼかす
+        ctx.drawImage(canvas, 0, 0);
+        material.uniforms.u_depth.value = new THREE.CanvasTexture(canvas);
+
+        status.innerText = "解析完了";
     });
 
     window.addEventListener('mousemove', (e) => {
@@ -219,15 +152,15 @@
         if (material) material.uniforms.u_offset.value.set(x, -y);
     });
 
+    subScaleUI.addEventListener('input', (e) => material.uniforms.u_subScale.value = parseFloat(e.target.value));
+    intensityUI.addEventListener('input', (e) => material.uniforms.u_intensity.value = parseFloat(e.target.value));
+
     window.addEventListener('resize', () => {
         renderer.setSize(window.innerWidth, window.innerHeight);
         material.uniforms.u_screen.value.set(window.innerWidth, window.innerHeight);
     });
 
-    function animate() {
-        requestAnimationFrame(animate);
-        renderer.render(scene, camera);
-    }
+    function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
 </script>
 </body>
 </html>
