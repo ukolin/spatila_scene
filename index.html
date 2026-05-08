@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Spatial Scene - Final Proto</title>
+    <title>AI Spatial Scene - Apple Perspective</title>
     <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
     <style>
         body { margin: 0; background: #050505; color: #eee; font-family: 'Helvetica Neue', Arial, sans-serif; overflow: hidden; }
@@ -12,9 +12,9 @@
         
         .control-group { margin-bottom: 20px; }
         label { display: block; font-size: 11px; color: #888; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+        .val { float: right; color: #007aff; font-family: monospace; }
         
-        input[type="file"] { width: 100%; font-size: 12px; color: #aaa; background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; border: 1px dashed #444; box-sizing: border-box; }
-
+        input[type="file"] { width: 100%; font-size: 12px; color: #aaa; background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px; border: 1px dashed #444; box-sizing: border-box; cursor: pointer; }
         input[type="range"] { width: 100%; margin: 0; cursor: pointer; accent-color: #007aff; }
 
         #status { font-size: 12px; min-height: 18px; color: #007aff; text-align: center; margin-top: 15px; font-weight: bold; }
@@ -35,24 +35,23 @@
     </div>
 
     <div class="control-group">
-        <label>2. Display Scale (Zoom)</label>
+        <label>2. Zoom Scale <span class="val" id="val-scale">1.00</span></label>
         <input type="range" id="scale-slider" min="0.1" max="2.0" step="0.01" value="1.0">
     </div>
 
     <div class="control-group">
-        <label>3. Parallax Intensity</label>
-        <input type="range" id="depth-slider" min="0.0" max="0.1" step="0.001" value="0.03">
+        <label>3. Spatial Depth <span class="val" id="val-depth">0.05</span></label>
+        <input type="range" id="depth-slider" min="0.0" max="0.2" step="0.001" value="0.05">
     </div>
 
     <div id="status">Waiting for image...</div>
     <div class="progress-bar" id="p-bar"><div id="progress-fill"></div></div>
     
-    <div class="hint">Mouse move to explore depth.<br>Depth-Anything-V2-Small inside.</div>
+    <div class="hint">Apple-Style Perspective: <br>Stable Foreground & Dynamic Background</div>
 </div>
 
 <script type="module">
     import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0-alpha.13';
-    
     env.allowLocalModels = false;
 
     let renderer, scene, camera, material, mesh;
@@ -72,7 +71,7 @@
         camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
         renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setPixelRatio(window.devicePixelRatio);
         document.body.appendChild(renderer.domElement);
 
         const geometry = new THREE.PlaneGeometry(2, 2);
@@ -81,8 +80,8 @@
             uniforms: {
                 u_texture: { value: new THREE.Texture() },
                 u_depth: { value: new THREE.Texture() },
-                u_offset: { value: new THREE.Vector2(0, 0) },
-                u_intensity: { value: 0.03 },
+                u_mouse: { value: new THREE.Vector2(0, 0) },
+                u_intensity: { value: 0.05 },
                 u_res: { value: new THREE.Vector2(1, 1) },
                 u_screen: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
                 u_scale: { value: 1.0 }
@@ -97,7 +96,7 @@
             fragmentShader: `
                 uniform sampler2D u_texture;
                 uniform sampler2D u_depth;
-                uniform vec2 u_offset;
+                uniform vec2 u_mouse;
                 uniform float u_intensity;
                 uniform vec2 u_res;
                 uniform vec2 u_screen;
@@ -105,29 +104,35 @@
                 varying vec2 vUv;
 
                 void main() {
-                    // Aspect ratio calculation (object-fit: cover logic)
+                    // Aspect ratio logic (object-fit: cover)
                     float sAspect = u_screen.x / u_screen.y;
                     float iAspect = u_res.x / u_res.y;
-                    
-                    // Apply zoom scale here
                     vec2 ratio = vec2(
                         min(sAspect / iAspect, 1.0) / u_scale,
                         min(iAspect / sAspect, 1.0) / u_scale
                     );
                     
-                    // Center-based UV calculation
                     vec2 uv = (vUv - 0.5) * ratio + 0.5;
 
-                    // Discard pixels outside image bounds
-                    if(uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-                        discard;
-                    }
+                    if(uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
 
-                    // Sample smoothed depth
+                    // --- Apple Spatial Boost Logic ---
                     float d = texture2D(u_depth, uv).r;
                     
-                    // Calculate parallax displacement
-                    vec2 finalUv = uv + u_offset * u_intensity * d;
+                    // 1. Inverse Parallax (奥ほど動く)
+                    // 背景の回り込みを2次関数で強調
+                    float moveWeight = pow(1.0 - d, 2.0); 
+                    vec2 move = u_mouse * u_intensity * moveWeight * 2.5;
+
+                    // 2. Perspective Expansion (手前の膨張)
+                    // 手前にあるものをわずかに大きくして、実在感を出しつつ背景の破綻を隠す
+                    float expansion = d * u_intensity * 0.4;
+                    vec2 expandedUv = (uv - 0.5) * (1.0 - expansion) + 0.5;
+
+                    vec2 finalUv = expandedUv + move;
+                    
+                    // Boundary safety
+                    finalUv = clamp(finalUv, 0.001, 0.999);
                     
                     gl_FragColor = texture2D(u_texture, finalUv);
                 }
@@ -136,7 +141,6 @@
 
         mesh = new THREE.Mesh(geometry, material);
         scene.add(mesh);
-        
         animate();
     }
 
@@ -156,29 +160,25 @@
                         if (p.status === 'progress') {
                             const pct = Math.round(p.progress);
                             pFill.style.width = pct + "%";
-                            status.innerText = `Downloading Model: ${pct}%`;
+                            status.innerText = `Loading Model: ${pct}%`;
                         }
                     }
                 });
             }
 
-            status.innerText = "Estimating Depth...";
+            status.innerText = "Estimating Depth Map...";
             const result = await depthEstimator(url);
             
-            const loader = new THREE.TextureLoader();
-            loader.load(url, (tex) => {
+            new THREE.TextureLoader().load(url, (tex) => {
                 material.uniforms.u_res.value.set(tex.image.width, tex.image.height);
                 material.uniforms.u_texture.value = tex;
                 tex.needsUpdate = true;
             });
 
-            // Smooth Depth Map Process
             const { width, height, data } = result.depth;
             const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
+            canvas.width = width; canvas.height = height;
             const ctx = canvas.getContext('2d');
-            
             const imgData = ctx.createImageData(width, height);
             for (let i = 0; i < data.length; i++) {
                 const v = data[i];
@@ -187,36 +187,37 @@
             }
             ctx.putImageData(imgData, 0, 0);
 
-            // Apply Gaussian Blur to smooth edges
+            // Gaussian Blur for smoothing depth transitions
             ctx.globalCompositeOperation = 'copy';
-            ctx.filter = `blur(${Math.max(width, height) * 0.015}px)`; 
+            ctx.filter = `blur(${Math.max(width, height) * 0.012}px)`; 
             ctx.drawImage(canvas, 0, 0);
 
-            const depthTex = new THREE.CanvasTexture(canvas);
-            material.uniforms.u_depth.value = depthTex;
-
+            material.uniforms.u_depth.value = new THREE.CanvasTexture(canvas);
             status.innerText = "Analysis Complete";
-            setTimeout(() => { pBar.style.display = 'none'; }, 1500);
+            setTimeout(() => { pBar.style.display = 'none'; }, 1000);
 
         } catch (err) {
+            status.innerText = "Error: Check WebGPU support";
             console.error(err);
-            status.innerText = "Error: " + err.message;
         }
     });
 
-    // UI Updates
     scaleSlider.addEventListener('input', (e) => {
-        material.uniforms.u_scale.value = parseFloat(e.target.value);
+        const val = parseFloat(e.target.value);
+        material.uniforms.u_scale.value = val;
+        document.getElementById('val-scale').innerText = val.toFixed(2);
     });
     
     depthSlider.addEventListener('input', (e) => {
-        material.uniforms.u_intensity.value = parseFloat(e.target.value);
+        const val = parseFloat(e.target.value);
+        material.uniforms.u_intensity.value = val;
+        document.getElementById('val-depth').innerText = val.toFixed(3);
     });
 
     window.addEventListener('mousemove', (e) => {
         const x = (e.clientX / window.innerWidth) - 0.5;
         const y = (e.clientY / window.innerHeight) - 0.5;
-        if (material) material.uniforms.u_offset.value.set(x, -y);
+        if (material) material.uniforms.u_mouse.value.set(x, -y);
     });
 
     window.addEventListener('resize', () => {
